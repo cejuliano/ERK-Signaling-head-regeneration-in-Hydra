@@ -1,0 +1,313 @@
+---
+title: "DGE_U126"
+output: html_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The block of code below loads the required libraries, we have included as comment lines with the sintaxis to download packages from BiocManger in case this is required by the user.
+```{r}
+#install packages for combat-seq
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("sva")
+
+library(sva)
+library(edgeR)
+library(limma)
+library(rstudioapi)
+library(ggfortify)
+
+```
+
+The next section performs a Differential Gene Expression analysis for the regeneration timecourse of head regeneration in H. vulgaris treated with either DMSO of U126. 
+
+```{r}
+Input = "resources/regeneration.mat.txt"
+counts <- read.table(Input, header=TRUE, row.names = 1, sep="\t", comment.char="")
+
+#Keep regeneration time course samples only
+counts[c("DMSO_WH_12H_1",	"DMSO_WH_12H_2",	"DMSO_WH_12H_3",
+         "U126_WH_12H_1",	"U126_WH_12H_2",	"U126_WH_12H_3")] <- NULL
+
+rowid <- row.names(counts)
+counts.names <- colnames(counts)
+
+#Preapare variables "batch" and "group indicating the columns belonging to each sequencing batch, and the comparisons groups respectively,  for ComBat_seq batch correction
+batch <- c(1,1,1,1,1,1,1,1,1,1,1,1,
+           2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2)
+
+group <- c(1,1,1,3,3,3,4,4,4,6,6,6,
+           1,1,1,7,7,7,8,8,8,4,4,4,9,9,9,10,10,10)
+
+counts<- data.matrix(counts, rownames.force = NA)
+
+#Perform batch correction using ComBat_seq
+counts <- ComBat_seq(counts, batch = batch, group = group)
+
+#Transform the output vector into a matrix with the batch-corrected counts
+counts <- matrix(data = counts, nrow =28917, ncol = 30)
+colnames(counts) = counts.names
+
+rownames(counts) <- rowid
+counts <- as.data.frame(counts)
+
+counts = counts[,!grepl("i",colnames(counts))]
+
+#Add IDs as column
+counts$ID <- rownames(counts)
+
+#define treatment groups
+factor1 = substr(colnames(counts[1:length(counts)-1]), 1, 1)
+factor2 = substr(colnames(counts[1:length(counts)-1]), 6, 6)
+grp = interaction(factor1,factor2)
+
+#Extract group names leaving the replicate number out
+grp = sub("..$", "", colnames(counts[1:length(counts)-1]))
+
+#Create the DGE object
+dge <- DGEList(counts = counts[,1:(ncol(counts)-1)], group = grp, genes = counts$ID)
+#exclude lowly expressed genes from the analysis 
+#(at least two samples have at least two counts per million)
+keep <- rowSums(cpm(dge)>=2) >= 2
+dge <- dge[keep, , keep.lib.sizes=F]
+
+#calculate normalization factors for each sample
+normdge <- calcNormFactors(dge)
+normdge = estimateCommonDisp(normdge)
+normdge$common.dispersion
+
+#Define groups for DGE analysis
+design <- model.matrix(~0+grp, data = normdge$samples) 
+colnames(design) <- gsub("grp","",colnames(design))
+
+#calculate differential gene expression
+normdge <- estimateGLMRobustDisp(normdge,design)
+
+fit <- glmFit(normdge, design, robust = T)
+
+#define pairwise comparisons to be used
+my.contrasts <- makeContrasts(
+  
+  DM.HR_3hvDMSO.HR_0 = `DMSO_HR_3H` - `DMSO_HR_0H`,
+  DMSO.HR_8hvDMSO.HR_0 = `DMSO_HR_8H` - `DMSO_HR_0H`,
+  DMSO.HR_12hvDMSO.HR_0 = `DMSO_HR_12H` - `DMSO_HR_0H`,
+
+  U0126.HR_3hvU0126.HR_0 = `U126_HR_3H` - `U126_HR_0H`,
+  U0126.HR_8hvU0126.HR_0 = `U126_HR_8H` - `U126_HR_0H`,
+  U0126.HR_12hvU0126.HR_0 = `U126_HR_12H` - `U126_HR_0H`,
+
+  DMSO.HR_3HvU0126.HR_3Hc0 =  (`DMSO_HR_3H` - `DMSO_HR_0H`) - (`U126_HR_3H` - `U126_HR_0H`),
+  DMSO.HR_8HvU0126.HR_8Hc0 =  (`DMSO_HR_8H` - `DMSO_HR_0H`) - (`U126_HR_8H` - `U126_HR_0H`),
+  DMSO.HR_12HvU0126.HR_12Hc0 =  (`DMSO_HR_12H` - `DMSO_HR_0H`) - (`U126_HR_12H` - `U126_HR_0H`),
+  
+  levels=design)
+
+# glmTreat performs a binomial regression over fold change values, and calculates an FDR directly onto the differences in FC #that genes might have at any expression levels. This tends to give more importance to the real differences in expression, #while still taking into account variability.
+
+#We will use this function to make our pairwise comparisons
+#function to generate the results objects for a named pairwise comparison
+fc = 0
+fdr = 5e-2
+
+genResTables <- function(x,fdr,fc) {
+  #pull full results
+  
+  y <- glmTreat(fit, contrast = my.contrasts[,x], lfc = log2(1.1), null = "interval")
+  y <- topTags(y, n=Inf)
+  #extract results table
+  z <-  y$table
+  z$ID <- rownames(z)
+  z <- merge(z,annotations, by= "ID", all.x = T)
+  
+  #significance filters
+  z.DG <- z[z$FDR <= fdr,]
+  z.DG.up <- z.DG[z.DG$logFC > fc,]
+  z.DG.down <- z.DG[z.DG$logFC < -fc,]
+  
+  #return the four results objects
+  return(list(z,z.DG,z.DG.up,z.DG.down))
+}
+
+Input = "resources/HVAEP1_annotation.csv" #Read annotations to add to results tables
+annotations <- read.csv(Input, header = TRUE, sep = ",", stringsAsFactors = F, row.names = NULL)
+
+
+#PARIWISE COMPARISONS
+#generate all results objects
+#systematize object naming based on contrast names
+for (i in 1:length(colnames(my.contrasts))) {
+  
+ resList <- genResTables(colnames(my.contrasts)[i],fdr,fc)
+ 
+ assign(colnames(my.contrasts)[i], resList[[1]])
+ assign(paste0(colnames(my.contrasts)[i],".DG"), resList[[2]])
+ assign(paste0(colnames(my.contrasts)[i],".DG.up"), resList[[3]])
+ assign(paste0(colnames(my.contrasts)[i],".DG.down"), resList[[4]])
+}
+#Save Results so Far!!
+
+#We also want to save the normalized counts (for plotting purposes)
+normalizedCounts <- as.data.frame(cpm(normdge, normalized.lib.sizes=T, log = T))
+normalizedCounts$ID <- rownames(normalizedCounts)
+normCounts <- merge(normalizedCounts, annotations, by="ID", all.x = T)
+
+#Create directory to allocate the results
+dir.create("Results.regen", recursive = TRUE)
+
+#Write results in new directory
+write.csv(normCounts, file = "Results.regen/normcounts.regen.csv")
+
+#save results dataframes, the DGE object, Annotations, and the normalized counts
+
+#save results from all contrasts
+saveThese <- ls(pattern = paste(colnames(my.contrasts),collapse = "|"))
+
+# save gene lists in a csv (more git friendly format)
+lapply(saveThese, function(x) write.csv(eval(parse(text=x)), file = paste0("Results.regen/","",x,".csv")))
+
+#save contrasts table to help make sense of file names
+write.csv(my.contrasts, file = "mycontrasts.regen.csv")
+
+saveThese <- c(saveThese,"normdge","normalizedCounts")
+
+save(file = "Results.regen/RNA_DGE.RData", list = saveThese)
+```
+
+
+The section below performs Differential Gene Expresssion Analysis for Whole Hydra either treated with DMSO or U126 for 12 hours
+
+```{r}
+Input = "whole_body_matrix.txt"
+counts <- read.table(Input, header=TRUE, row.names = 1, sep="\t", comment.char="")
+
+#Keep whole Hydra samples only
+counts[c("DMSO_HR_0H_1",	"DMSO_HR_0H_2",	"DMSO_HR_0H_3",	"DMSO_HR_3H_1",	"DMSO_HR_3H_2",	"DMSO_HR_3H_3",	"U126_HR_0H_1",	"U126_HR_0H_2",	"U126_HR_0H_3",	
+"U126_HR_3H_1",	"U126_HR_3H_2",	"U126_HR_3H_3",
+"DMSO_HR_0H_4",	"DMSO_HR_0H_5",	"DMSO_HR_0H_6",	
+"DMSO_HR_8H_1",	"DMSO_HR_8H_2",	"DMSO_HR_8H_3",
+"DMSO_HR_12H_1", "DMSO_HR_12H_2",	"DMSO_HR_12H_3",	
+"U126_HR_0H_4",	"U126_HR_0H_5",	"U126_HR_0H_6",	
+"U126_HR_8H_1",	"U126_HR_8H_2",	"U126_HR_8H_3",	
+"U126_HR_12H_1",	"U126_HR_12H_2",	"U126_HR_12H_3")] <- NULL
+
+rowid <- row.names(counts)
+counts.names <- colnames(counts)
+
+# rownames(counts) <- rowid
+# counts <- as.data.frame(counts)
+
+counts = counts[,!grepl("i",colnames(counts))]
+
+#Add IDs as column
+counts$ID <- rownames(counts)
+
+#define treatment groups
+factor1 = substr(colnames(counts[1:length(counts)-1]), 1, 1)
+factor2 = substr(colnames(counts[1:length(counts)-1]), 6, 6)
+grp = interaction(factor1,factor2)
+
+#Extract group names leaving the replicate number out
+grp = sub("..$", "", colnames(counts[1:length(counts)-1]))
+
+#Create the DGE object
+dge <- DGEList(counts = counts[,1:(ncol(counts)-1)], group = grp, genes = counts$ID)
+#exclude lowly expressed genes from the analysis 
+#(at least two samples have at least two counts per million)
+keep <- rowSums(cpm(dge)>=2) >= 2
+dge <- dge[keep, , keep.lib.sizes=F]
+
+#calculate normalization factors for each sample
+normdge <- calcNormFactors(dge)
+normdge = estimateCommonDisp(normdge)
+normdge$common.dispersion
+
+#Define groups for DGE analysis
+design <- model.matrix(~0+grp, data = normdge$samples) 
+colnames(design) <- gsub("grp","",colnames(design))
+
+#calculate differential gene expression
+normdge <- estimateGLMRobustDisp(normdge,design)
+
+fit <- glmFit(normdge, design, robust = T)
+
+#define pairwise comparisons to be used
+my.contrasts <- makeContrasts(
+  
+   U126vsDMSO_Whole = `U126_WH_12H` - `DMSO_WH_12H`,
+ 
+  levels=design)
+
+#We will use glmTreat to make our pairwise comparisons
+#function to generate the results objects for a named pairwise comparison
+fc = 0
+fdr = 5e-2
+
+genResTables <- function(x,fdr,fc) {
+  #pull full results
+  y <- glmTreat(fit, contrast = my.contrasts[,x], lfc = log2(1.1), null = "interval")
+  y <- topTags(y, n=Inf)
+  
+  #extract results table
+  z <-  y$table
+  z$ID <- rownames(z)
+  z <- merge(z,annotations, by= "ID", all.x = T)
+  
+  #significance filters
+  z.DG <- z[z$FDR <= fdr,]
+  z.DG.up <- z.DG[z.DG$logFC > fc,]
+  z.DG.down <- z.DG[z.DG$logFC < -fc,]
+  
+  #return the four results objects
+  return(list(z,z.DG,z.DG.up,z.DG.down))
+}
+
+Input = "HVAEP1_annotation.csv" #Read annotations to add to results tables
+annotations <- read.csv(Input, header = TRUE, sep = ",", stringsAsFactors = F, row.names = NULL)
+
+
+#PARIWISE COMPARISONS
+#generate all results objects
+#systematize object naming based on contrast names
+for (i in 1:length(colnames(my.contrasts))) {
+  
+ resList <- genResTables(colnames(my.contrasts)[i],fdr,fc)
+ 
+ assign(colnames(my.contrasts)[i], resList[[1]])
+ assign(paste0(colnames(my.contrasts)[i],".DG"), resList[[2]])
+ assign(paste0(colnames(my.contrasts)[i],".DG.up"), resList[[3]])
+ assign(paste0(colnames(my.contrasts)[i],".DG.down"), resList[[4]])
+}
+#Save Results so Far!!
+
+#We also want to save the normalized counts (for plotting purposes)
+normalizedCounts <- as.data.frame(cpm(normdge, normalized.lib.sizes=T, log = T))
+normalizedCounts$ID <- rownames(normalizedCounts)
+normCounts <- merge(normalizedCounts, annotations, by="ID", all.x = T)
+
+#Create directory to allocate the results
+dir.create("Results.whole", recursive = TRUE)
+
+#Write results in new directory
+write.csv(normCounts, file = "Results.whole/normcounts.whole.csv")
+
+#save results dataframes, the DGE object, Annotations, and the normalized counts
+
+#save results from all contrasts
+saveThese <- ls(pattern = paste(colnames(my.contrasts),collapse = "|"))
+
+# save gene lists in a csv (more git friendly format)
+lapply(saveThese, function(x) write.csv(eval(parse(text=x)), file = paste0("Results.whole/","",x,".csv")))
+
+#save contrasts table to help make sense of file names
+write.csv(my.contrasts, file = "mycontrasts.noFR.csv")
+
+saveThese <- c(saveThese,"normdge","normalizedCounts")
+
+save(file = "Results.whole/RNA_DGE.RData", list = saveThese)
+```
+

@@ -1,0 +1,207 @@
+---
+title: "GO enrichment"
+output: html_document
+date: "2025-12-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+GENE ONTOLOGY ENRICHMENT ANALYSIS TOPGO
+
+Installation of packages required for GO enrichment analysis
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# # The following initializes usage of Bioc devel
+# BiocManager::install(version='devel')
+# 
+# BiocManager::install("topGO")
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("org.Hs.eg.db")
+
+```
+
+Load required libraries
+```{r}
+library(tidyverse)
+library(topGO)
+library(org.Hs.eg.db)
+
+```
+
+The section below performs GO enrichment analysis for genes in clusters 2 and 6 from maSigPro analysis
+```{r}
+#Read required files
+Input <- "resources/cluster_2-6.csv"
+cluster <- read.csv(Input, header=TRUE, row.names = NULL, sep=",", comment.char="" )
+
+Input <- "resources/background_GO.csv"
+background <- read.csv(Input, header = TRUE, sep = ",", row.names = NULL, comment.char = "" )
+
+#transform cluster file into table
+cluster <- as.character(cluster$SYMBOL)
+present_table <- background %>% 
+    dplyr::select("SYMBOL") %>% unique()  %>% 
+    mutate(present = if_else(SYMBOL %in% cluster, 1, 0))
+present <- as.numeric(present_table$present)
+names(present) <- as.character(present_table$SYMBOL)
+
+#Indicate GO main type
+allGO2genes <- annFUN.org(
+  whichOnto = 'BP',
+  feasibleGenes = NULL,
+  mapping = 'org.Hs.eg.db',
+  ID = 'symbol')
+
+#return genes 
+cluster <- function(allScore) {
+  return(allScore == 1)
+}
+
+#Build topGO objecto with gene identifiers and scores
+GOdata <- new('topGOdata',
+  ontology = 'BP',
+  allGenes = present,
+  geneSel = cluster,
+  annot = annFUN.GO2genes,
+  GO2genes = allGO2genes,
+  nodeSize = 5)
+
+resultFisher  <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+
+resultFDR <- p.adjust(resultFisher@score, method = "BH")
+
+table.GO <- GenTable(GOdata,resultFisher, topNodes = 120)
+tmp <- as.numeric(resultFDR[table.GO$GO.ID])
+
+table.GO$FDR <- tmp
+table.GO <- table.GO[table.GO$FDR<.05,]
+
+dir.create("resultsGO", recursive = TRUE)
+write.csv(table.GO, file="resultsGO/GOtable.cluster2-6.csv")
+
+allgenes.terms <- genesInTerm(GOdata,table.GO$GO.ID)
+
+library(gridExtra)
+pdf("resultsGO/go_table..cluster2-6.pdf", height=11, width=10) 
+colnames(table.GO) = c("GO ID", "GO Term", "Annotated", "Significant", "Expected", "p-val", "FDR")
+grid.table(table.GO, rows = NULL)
+dev.off()
+
+```
+
+This section GO enrichment analysis for genes in clusters 5 and 9 from maSigPro analysis
+```{r}
+#Read required files
+Input <- "resources/cluster_5-9.csv"
+cluster <- read.csv(Input, header=TRUE, row.names = NULL, sep=",", comment.char="" )
+
+Input <- "resources/background_GO.csv"
+background <- read.csv(Input, header = TRUE, sep = ",", row.names = NULL, comment.char = "" )
+
+#transform cluster file into table
+cluster <- as.character(cluster$SYMBOL)
+present_table <- background %>% 
+    dplyr::select("SYMBOL") %>% unique()  %>% 
+    mutate(present = if_else(SYMBOL %in% cluster, 1, 0))
+present <- as.numeric(present_table$present)
+names(present) <- as.character(present_table$SYMBOL)
+
+#Indicate GO main type
+allGO2genes <- annFUN.org(
+  whichOnto = 'BP',
+  feasibleGenes = NULL,
+  mapping = 'org.Hs.eg.db',
+  ID = 'symbol')
+
+#return genes 
+cluster <- function(allScore) {
+  return(allScore == 1)
+}
+
+#Build topGO objecto with gene identifiers and scores
+GOdata <- new('topGOdata',
+  ontology = 'BP',
+  allGenes = present,
+  geneSel = cluster,
+  annot = annFUN.GO2genes,
+  GO2genes = allGO2genes,
+  nodeSize = 5)
+
+resultFisher  <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+
+resultFDR <- p.adjust(resultFisher@score, method = "BH")
+
+table.GO <- GenTable(GOdata,resultFisher, topNodes = 120)
+tmp <- as.numeric(resultFDR[table.GO$GO.ID])
+
+table.GO$FDR <- tmp
+table.GO <- table.GO[table.GO$FDR<.05,]
+
+write.csv(table.GO, file="resultsGO/GOtable.cluster5-9.csv")
+
+allgenes.terms <- genesInTerm(GOdata,table.GO$GO.ID)
+
+library(gridExtra)
+pdf("resultsGO/go_table.cluster5-9.pdf", height=11, width=10) 
+colnames(table.GO) = c("GO ID", "GO Term", "Annotated", "Significant", "Expected", "p-val", "FDR")
+grid.table(table.GO, rows = NULL)
+dev.off()
+
+```
+
+GO enrichment dot plot from maSigPro clusters 2-6. This table was previously reduced using MonaGO (https://monago.erc.monash.edu). A reduced table for GO terms is provided in the resources folder.
+```{r}
+# import package
+library("ggplot2")
+
+Input = "resultsGO/GOtable.2-6.reduced.csv"
+data <- read.csv(Input, sep = ",", header = TRUE, stringsAsFactors = FALSE, row.names = NULL)
+
+# plot: dot plot
+pdf("GO.3hpa.dotplot.pdf", width = 10, height = 6)
+p <- ggplot(data = data, aes(x = Gene.ratio, y = reorder(Term,Gene.ratio), 
+                        color = `p.adjust`, size = Gene.count)) + 
+  geom_point() +
+  scale_size(range = c(5,10)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme(text = element_text(size = 14)) +
+  ylab("") + 
+  xlab("Gene ratio") + 
+  ggtitle("GO enrichment analysis")
+p + theme_pubr(legend = c("right"))
+print(p)
+dev.off()
+```
+
+
+GO enrichment dot plot from maSigPro clusters 5-9. This table was previously reduced using MonaGO (https://monago.erc.monash.edu). A reduced table for GO terms is provided in the resources folder.
+```{r}
+# import package
+library("ggplot2")
+
+Input = "resultsGO/GOtable.5-9.reduced.csv"
+data <- read.csv(Input, sep = ",", header = TRUE, stringsAsFactors = FALSE, row.names = NULL)
+
+# plot: dot plot
+pdf("GO.12hpa.dotplot.pdf", width = 10, height = 6)
+p <- ggplot(data = data, aes(x = Gene.ratio, y = reorder(Term,Gene.ratio), 
+                        color = `p.adjust`, size = Gene.count)) + 
+  geom_point() +
+  scale_size(range = c(5,10)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme(text = element_text(size = 14)) +
+  ylab("") + 
+  xlab("Gene ratio") + 
+  ggtitle("GO enrichment analysis")
+p + theme_pubr(legend = c("right"))
+print(p)
+dev.off()
+```
